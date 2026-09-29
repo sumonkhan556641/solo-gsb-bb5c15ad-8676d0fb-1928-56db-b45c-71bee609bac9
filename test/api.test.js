@@ -294,6 +294,35 @@ test('双面生产标记：纸张过小时标记省略并返回逐候选原因',
   }
 });
 
+test('双面生产标记：折线标沿折线与出血框共边不省略（仅共边允许，正背套准）', async () => {
+  const srv = await startServer();
+  try {
+    // 纸宽 200 / 纸高 300 / 成品页 100×250 / 出血 0 / 标记 30mm：
+    // 两侧出血框在折线 x=100 处共边相接，折线标沿公共边界只共边、不穿入框内
+    const res = await postJson(`${srv.baseUrl}/api/impose`, {
+      ...BASE, flip: 'long',
+      paperWidth: 200, paperHeight: 300, pageWidth: 100, pageHeight: 250, bleedMm: 0,
+      productionMarks: true, markSizeMm: 30,
+    });
+    assert.equal(res.status, 200);
+    const pm = res.body.productionMarks;
+    assert.equal(pm.placedCount, 8); // 2 张 × 2 面 × 2 折线标
+    const sheetPm = res.body.signatures[0].sheets[0].productionMarks;
+    const foldIds = sheetPm.front.placed.map((m) => m.id).sort();
+    assert.deepEqual(foldIds, ['fold-bottom', 'fold-top']);
+    const top = sheetPm.front.placed.find((m) => m.id === 'fold-top');
+    assert.deepEqual(top.segments, [{ x1: 100, y1: 0, x2: 100, y2: 30 }]);
+    // 其余标记真正超出纸张，仍按 segment-outside-paper 省略
+    assert.ok(sheetPm.front.omitted.every((o) => o.reasonCode === 'segment-outside-paper'));
+    // 背面同步放置并按长边翻转物理套准（上方折线标落到下方）
+    const backTop = sheetPm.back.placed.find((m) => m.pairedWith === 'fold-top');
+    assert.deepEqual(backTop.segments, [{ x1: 100, y1: 300, x2: 100, y2: 270 }]);
+    assert.equal(backTop.transform.flip, 'long');
+  } finally {
+    await srv.close();
+  }
+});
+
 test('双面生产标记：未启用适配检查 / 尺寸非法返回 400；缺省参数不启用', async () => {
   const srv = await startServer();
   try {

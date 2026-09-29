@@ -165,8 +165,8 @@ test('标记尺寸开关：自定义 markSizeMm 生效，缺省 5mm', () => {
 });
 
 test('纸张过小无可用位置：标记省略并逐候选返回原因，背面同步省略', () => {
-  // 426×303 纸张放 210×297 + 出血 3：两侧出血框几乎贴满纸张，
-  // 裁切线 / 套准十字没有纸面空间（折线标与出血框相交），全部省略
+  // 426×303 纸张放 210×297 + 出血 3：两侧出血框越过折线 3mm 相接重叠，
+  // 裁切线 / 套准十字没有纸面空间，折线标穿入出血框内部，全部省略
   const r = computeImposition({
     ...BASE, paperWidth: 426, paperHeight: 303,
     productionMarks: true,
@@ -188,7 +188,7 @@ test('纸张过小无可用位置：标记省略并逐候选返回原因，背�
   assert.deepEqual(reg.attempts.map((a) => a.position), [1, 2, 3]);
   assert.match(reg.reason, /候选位置 1/);
   assert.match(reg.reason, /候选位置 3/);
-  // 折线标与出血框相交（中线两侧出血框在中线上相接）
+  // 折线标穿入出血框（出血越过折线 3mm，中线 x=213 位于两侧出血框内部）
   const fold = m.front.omitted.find((o) => o.id === 'fold-top');
   assert.equal(fold.reasonCode, 'segment-hits-bleed-box');
   // 背面省略原因指向正面同名标记
@@ -304,7 +304,7 @@ test('线段相交原语：共线重叠算相交，端点相接 / 十字端点�
   assert.equal(segIntersect({ x1: 0, y1: 5, x2: 10, y2: 5 }, { x1: 0, y1: 6, x2: 10, y2: 6 }), false);
 });
 
-test('线段与出血框：共线于框边界仅端点相接不算，沿边界正长度重叠算相交', () => {
+test('线段与出血框：折线标沿折线与出血框共边允许放置；真正穿入框内仍省略', () => {
   const { placeFrontMarks } = require('../src/productionMarks');
   // 直接构造一张带 fit 的最小纸张数据：左/右页位 trim 100×100、出血框 90..110
   const fitLeft = {
@@ -316,7 +316,7 @@ test('线段与出血框：共线于框边界仅端点相接不算，沿边界�
     bleedBox: { x: 90, y: -10, width: 120, height: 120 },
   };
   const fakeSheet = { front: { left: { fit: fitLeft }, right: { fit: fitRight } } };
-  // 纸张 200×200，尺寸 3：折线标 x=100 落在两侧出血框并集区间内（左框到 110）-> 省略
+  // 纸张 200×200，尺寸 3：折线标 x=100 穿入左框内部（左框右边界 110）-> 省略
   const { placed, omitted } = placeFrontMarks(fakeSheet, 200, 200, 3);
   assert.ok(omitted.some((o) => o.id === 'fold-top' && o.reasonCode === 'segment-hits-bleed-box'));
   // 裁切线水平段 y=0（trim 顶边）位于出血框 y 区间 [-10,110] 内，x -12..-15 全程
@@ -331,21 +331,78 @@ test('线段与出血框：共线于框边界仅端点相接不算，沿边界�
   assert.ok(reg && reg.attempts.length === 3);
   // 放置成功的标记不包含被省略项
   assert.equal(placed.some((p) => p.id === 'fold-top'), false);
+
+  // 出血 0、两侧出血框恰在折线 x=100 共边相接时：折线标沿公共边界只共边 -> 允许落位
+  const edgeFitLeft = {
+    trim: { x: 0, y: 0, width: 100, height: 100 },
+    bleedBox: { x: 0, y: 0, width: 100, height: 100 },
+  };
+  const edgeFitRight = {
+    trim: { x: 100, y: 0, width: 100, height: 100 },
+    bleedBox: { x: 100, y: 0, width: 100, height: 100 },
+  };
+  const edgeSheet = { front: { left: { fit: edgeFitLeft }, right: { fit: edgeFitRight } } };
+  const edge = placeFrontMarks(edgeSheet, 200, 200, 3);
+  assert.deepEqual(edge.placed.filter((p) => p.type === 'fold').map((p) => p.id), ['fold-top', 'fold-bottom']);
+  assert.equal(edge.omitted.some((o) => o.type === 'fold'), false);
 });
 
-test('segHitsBox：线段沿框边界正长度重叠算相交，仅端点 / 角点相接不算', () => {
+test('segHitsBox：穿入框内部且延伸维正长度重叠才算，边界共线 / 端点 / 角点相接不算', () => {
   const { segHitsBox } = require('../src/productionMarks');
   const box = { x: 10, y: 20, width: 30, height: 40 }; // 10..40 × 20..60
-  // 水平线 y=20（框上边界），x 5..15：与边界 [10,20) 正长度重叠 -> 相交
-  assert.equal(segHitsBox({ x1: 5, y1: 20, x2: 15, y2: 20 }, box), true);
-  // 水平线 y=19（框外 1mm）-> 不相交
+  // 水平线 y=20（框上边界），x 5..15：与边界共线 -> 不算
+  assert.equal(segHitsBox({ x1: 5, y1: 20, x2: 15, y2: 20 }, box), false);
+  // 水平线 y=60（框下边界），整段沿边界 -> 不算
+  assert.equal(segHitsBox({ x1: 15, y1: 60, x2: 35, y2: 60 }, box), false);
+  // 水平线 y=19（框外 1mm）-> 不算
   assert.equal(segHitsBox({ x1: 10, y1: 19, x2: 40, y2: 19 }, box), false);
   // 水平线终点恰在框角 (10,20) -> 仅角点相接，不算
   assert.equal(segHitsBox({ x1: 0, y1: 20, x2: 10, y2: 20 }, box), false);
-  // 竖直线 x=10（框左边界），y 25..30 沿边界 -> 相交
-  assert.equal(segHitsBox({ x1: 10, y1: 25, x2: 10, y2: 30 }, box), true);
+  // 水平线在框内 y=30，仅端点触框边界 x=10 -> 延伸维无正长度重叠，不算
+  assert.equal(segHitsBox({ x1: 0, y1: 30, x2: 10, y2: 30 }, box), false);
+  // 竖直线 x=10（框左边界），y 25..30 沿边界 -> 不算
+  assert.equal(segHitsBox({ x1: 10, y1: 25, x2: 10, y2: 30 }, box), false);
+  // 竖直线 x=40（框右边界）整段沿边界 -> 不算
+  assert.equal(segHitsBox({ x1: 40, y1: 0, x2: 40, y2: 100 }, box), false);
   // 竖直线穿过框内部 -> 相交
   assert.equal(segHitsBox({ x1: 25, y1: 0, x2: 25, y2: 100 }, box), true);
+  // 水平线穿过框内部且正长度重叠 -> 相交
+  assert.equal(segHitsBox({ x1: 0, y1: 30, x2: 50, y2: 30 }, box), true);
+  // 竖直线在框内 x=25，仅端点触框边 y=20 -> 不算
+  assert.equal(segHitsBox({ x1: 25, y1: 10, x2: 25, y2: 20 }, box), false);
+});
+
+test('回归：纸宽 200 / 纸高 300 / 成品页 100×250 / 出血 0 / 标记 30mm，折线标沿折线共边正常落位、正背套准', () => {
+  const SCENARIO = {
+    totalPages: 8, sheetsPerSignature: 2, binding: 'left', flip: 'long',
+    paperWidth: 200, paperHeight: 300, pageWidth: 100, pageHeight: 250, bleedMm: 0,
+    productionMarks: true, markSizeMm: 30,
+  };
+  const r = computeImposition(SCENARIO);
+  const m = sheetMarks(r);
+  // 折线标与出血框只共边（x=100 为两侧出血框公共边），不应再误判相交
+  const foldTop = m.front.placed.find((x) => x.id === 'fold-top');
+  const foldBottom = m.front.placed.find((x) => x.id === 'fold-bottom');
+  assert.deepEqual(foldTop.segments, [{ x1: 100, y1: 0, x2: 100, y2: 30 }]);
+  assert.deepEqual(foldBottom.segments, [{ x1: 100, y1: 300, x2: 100, y2: 270 }]);
+  assert.equal(m.front.omitted.some((o) => o.type === 'fold'), false);
+  // 裁切线（间隙 2 + 尺寸 30 = 32mm，纸面外侧无空间）与套准十字仍因超出纸张省略
+  assert.equal(m.front.omitted.length, 10);
+  assert.ok(m.front.omitted.every((o) => o.reasonCode === 'segment-outside-paper'));
+  // 背面随正面放置并按长边翻转物理套准
+  const backTop = m.back.placed.find((x) => x.pairedWith === 'fold-top');
+  const backBottom = m.back.placed.find((x) => x.pairedWith === 'fold-bottom');
+  assert.deepEqual(backTop.segments, [{ x1: 100, y1: 300, x2: 100, y2: 270 }]);
+  assert.deepEqual(backBottom.segments, [{ x1: 100, y1: 0, x2: 100, y2: 30 }]);
+  assert.equal(m.back.omitted.some((o) => o.type === 'fold'), false);
+  assert.equal(r.productionMarks.placedCount, 8); // 2 张 × 2 面 × 2 折线标
+  assert.equal(r.productionMarks.omittedCount, 40); // 2 张 × 2 面 × 10
+
+  // 短边翻转同样落位：折线在垂直中线上，x 翻转后坐标不变
+  const rs = computeImposition({ ...SCENARIO, flip: 'short' });
+  const ms = sheetMarks(rs);
+  assert.deepEqual(ms.front.placed.find((x) => x.id === 'fold-top').segments, [{ x1: 100, y1: 0, x2: 100, y2: 30 }]);
+  assert.deepEqual(ms.back.placed.find((x) => x.pairedWith === 'fold-top').segments, [{ x1: 100, y1: 0, x2: 100, y2: 30 }]);
 });
 
 test('试印核验重算不受生产标记影响：同时启用时 verification 正常返回', () => {

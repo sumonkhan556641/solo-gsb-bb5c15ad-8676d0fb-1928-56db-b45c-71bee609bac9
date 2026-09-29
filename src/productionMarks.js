@@ -15,7 +15,10 @@
  *
  * 落位规则（对每个标记按固定候选位置顺序依次尝试）：
  * 1. 线段必须完整落在纸张矩形内（端点可贴纸张边缘）；
- * 2. 线段不得与本面两侧（左 / 右页位）的出血框正长度相交（仅端点 / 边界相接不算）；
+ * 2. 线段不得穿入本面两侧（左 / 右页位）出血框的内部——只有退化维坐标
+ *    严格位于框区间内部、且延伸维与框区间正长度重叠才算相交；
+ *    与出血框边界共线（例如折线标沿两侧出血框相接的折线）或仅端点 / 角点
+ *    相接均允许落位；
  * 3. 线段不得与同一面已放置的标记相交。
  * 候选位置全部不可用则该标记省略，并在 omitted 中逐候选给出原因
  * （segment-outside-paper / segment-hits-bleed-box / segment-hits-mark）。
@@ -140,9 +143,12 @@ function segIntersect(a, b) {
 }
 
 /**
- * 线段是否与矩形框正长度相交 / 重叠。
- * 线段为水平或竖直：其在另一维（退化维）上须严格落在框内或与其边界共线，
- * 在延伸维上与框区间正长度重叠；仅端点 / 边界相接不算。
+ * 线段是否穿入矩形框内部并与框正长度重叠。
+ * 线段为水平或竖直，必须同时满足：
+ * - 退化维坐标严格位于框区间内部（与框边界共线不算穿入）；
+ * - 延伸维与框区间正长度重叠（仅端点 / 角点相接不算）。
+ * 因此沿出血框边界整段共线（折线标沿折线与两侧出血框共边）不阻止放置，
+ * 真正穿入框内部的线段仍按相交处理。
  */
 function segHitsBox(seg, box) {
   const bxMax = box.x + box.width;
@@ -150,12 +156,13 @@ function segHitsBox(seg, box) {
   const horizontal = Math.abs(seg.y1 - seg.y2) <= EPS;
   if (horizontal) {
     const y = seg.y1;
-    if (y < box.y - EPS || y > byMax + EPS) return false;
+    // 水平线：y 须严格在框内部（与上 / 下边界共线允许）
+    if (!(y > box.y + EPS && y < byMax - EPS)) return false;
     return rangesOverlap(Math.min(seg.x1, seg.x2), Math.max(seg.x1, seg.x2), box.x, bxMax);
   }
-  // 竖直线段
+  // 竖直线段：x 须严格在框内部（与左 / 右边界共线允许）
   const x = seg.x1;
-  if (x < box.x - EPS || x > bxMax + EPS) return false;
+  if (!(x > box.x + EPS && x < bxMax - EPS)) return false;
   return rangesOverlap(Math.min(seg.y1, seg.y2), Math.max(seg.y1, seg.y2), box.y, byMax);
 }
 

@@ -2189,7 +2189,7 @@ function buildNotes(input, creep, fit, violations, marks, markOmissions) {
       color: '#0f766e',
     });
     lines.push({
-      text: '落位规则：每个标记的线段须完整落在纸内、避开两侧出血框且不与同面已放置标记相交；候选位置均不可用则省略并返回原因（爬移 / 尺寸变化时随重算同步刷新）。',
+      text: '落位规则：每个标记的线段须完整落在纸内、不穿入两侧出血框内部（与框边界共线或仅端点相接允许）且不与同面已放置标记相交；候选位置均不可用则省略并返回原因（爬移 / 尺寸变化时随重算同步刷新）。',
       color: '#5a6b85',
     });
     if (!markOmissions || markOmissions.length === 0) {
