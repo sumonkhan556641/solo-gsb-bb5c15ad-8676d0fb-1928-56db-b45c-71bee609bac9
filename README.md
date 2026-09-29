@@ -187,8 +187,10 @@ npm test           # 运行全部测试（拼版逻辑单元测试 + HTTP 接口
 落位规则（按候选位置固定顺序尝试，输出唯一确定）：
 
 1. 每条线段必须**完整落在纸张矩形内**（端点可贴纸张边缘），否则该候选记 `segment-outside-paper`；
-2. 线段不得与本面两侧出血框**正长度相交**（仅端点 / 边界相接不算），否则记 `segment-hits-bleed-box`；
+2. 线段不得**真正穿入**本面两侧出血框内部：轴对齐线段的退化维（水平段的 `y` / 竖直段的 `x`）必须**严格位于框的两条边界之间**，且延伸维与框区间正长度重叠才记 `segment-hits-bleed-box`；**与出血框边界共线（哪怕沿边界正长度重叠，如出血 0 时折线标沿折线与两侧出血框只共边）或仅端点 / 角点接触均允许落位**；
 3. 线段不得与同一面**已放置标记**相交（放置顺序：裁切线左上 → 右上 → 右下 → 左下，每角先水平后竖直 → 折线标上 → 下 → 套准十字左 → 右），否则记 `segment-hits-mark`。
+
+> 典型场景：纸宽 200mm、成品页 100mm、出血 0 时两侧出血框恰在折线 `x=100` 上相接，折线标沿折线只与出血框**共边**，按规则 2 **允许放置**；若出血大到跨过折线（折线严格落在出血框内部），折线标穿入框内，仍记 `segment-hits-bleed-box` 省略。
 
 同一面放置顺序固定为：裁切线 → 折线标 → 套准十字；一个标记的全部候选位置都不可用时**省略**该标记，并在 `omitted` 中逐候选返回 `attempts`（位置编号、是否可用、逐线段原因代码与说明）、`reasonCode`（最后一个候选的首条原因）、`reasonSummary` 与完整 `reason`。
 
@@ -755,6 +757,48 @@ curl -s -X POST http://localhost:8080/api/impose \
     "markSizeMm": 5
   }' | jq '.productionMarks | { enabled, markSizeMm, placedCount, omittedCount }'
 # => { "enabled": true, "markSizeMm": 5, "placedCount": 48, "omittedCount": 0 }
+```
+
+调用示例（**折线标与出血框共边允许落位**：200×300 纸张放 100×250 成品页、出血 0、标记 30mm，长边翻转）：
+
+```bash
+curl -s -X POST http://localhost:8080/api/impose \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "totalPages": 4,
+    "sheetsPerSignature": 1,
+    "binding": "left",
+    "flip": "long",
+    "paperWidth": 200,
+    "paperHeight": 300,
+    "pageWidth": 100,
+    "pageHeight": 250,
+    "bleedMm": 0,
+    "productionMarks": true,
+    "markSizeMm": 30
+  }' | jq '.signatures[0].sheets[0].productionMarks | {
+      frontPlaced: .front.placed[].id,
+      frontOmitted: [.front.omitted[] | {id, reasonCode}],
+      backPlaced: .back.placed[] | {pairedWith, segments}
+    }'
+# 两侧出血框（=trim）恰在折线 x=100 相接：折线标沿折线只共边，正 / 背面均落位
+# => {
+#      "frontPlaced": "fold-top",   "frontPlaced": "fold-bottom",
+#      "frontOmitted": [ {id:"crop-*/register-*", reasonCode:"segment-outside-paper"}, … ],
+#      "backPlaced":  { "pairedWith": "fold-top", "segments": [{"x1":100,"y1":300,"x2":100,"y2":270}] },
+#                     { "pairedWith": "fold-bottom", "segments": [{"x1":100,"y1":0,"x2":100,"y2":30}] }
+#    }
+# 顶层汇总：{ "placedCount": 4, "omittedCount": 20 }（2 面 × 2 折线标落位；
+# 裁切线 / 套准十字水平段伸出纸外仍按 segment-outside-paper 省略，背面 paired-front-omitted）
+```
+
+同一参数把 `bleedMm` 改成 5（出血跨过折线，折线严格落在出血框内部）时，折线标真正穿入框内，仍按既有规则省略并说明原因：
+
+```bash
+# front.omitted 中：
+# { "id": "fold-top", "reasonCode": "segment-hits-bleed-box",
+#   "reasonSummary": "线段与出血框相交（出血框范围 -5 ~ 105 × 20 ~ 280 mm）" }
+# back.omitted 中同名标记：{ "reasonCode": "paired-front-omitted", "pairedWith": "fold-top" }
 ```
 
 调用示例（启用印刷备料：16 页、2 帖各 2 张、1000 份、每帖开机损耗 10 张、过程损耗率 3%、每包 500 张）：

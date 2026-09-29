@@ -164,9 +164,100 @@ test('标记尺寸开关：自定义 markSizeMm 生效，缺省 5mm', () => {
   assert.deepEqual(foldTop.segments, [{ x1: 230, y1: 0, x2: 230, y2: 10 }]);
 });
 
+test('折线标沿折线与出血框只共边时允许放置（出血 0，成品页铺满页位宽度），正背均落位', () => {
+  // 本轮修复场景：200×300 纸张、100×250 成品页、出血 0、标记 30mm。
+  // 两侧出血框（=trim）恰在折线 x=100 上相接，折线标沿折线只与框共边，
+  // 旧逻辑误判 segment-hits-bleed-box 而省略，背面随之缺标。
+  const r = computeImposition({
+    totalPages: 4, sheetsPerSignature: 1, binding: 'left', flip: 'long',
+    paperWidth: 200, paperHeight: 300, pageWidth: 100, pageHeight: 250,
+    bleedMm: 0, productionMarks: true, markSizeMm: 30,
+  });
+  const m = sheetMarks(r);
+  // 出血框在中线上相接（共边而非穿入）
+  const leftBox = r.signatures[0].sheets[0].front.left.fit.bleedBox;
+  const rightBox = r.signatures[0].sheets[0].front.right.fit.bleedBox;
+  assert.equal(leftBox.x + leftBox.width, 100);
+  assert.equal(rightBox.x, 100);
+  // 只有上 / 下折线标落位（x=100 沿公共边界，y 0..30 / 270..300 在框外）；
+  // 裁切线 / 套准十字因伸出纸外仍省略，不属于本次共边修复范围
+  assert.deepEqual(m.front.placed.map((x) => x.id), ['fold-top', 'fold-bottom']);
+  assert.deepEqual(
+    m.front.omitted.filter((o) => o.type === 'fold').map((o) => o.id),
+    []
+  );
+  assert.ok(m.front.omitted.every((o) => o.reasonCode === 'segment-outside-paper'));
+  const foldTop = m.front.placed.find((x) => x.id === 'fold-top');
+  assert.deepEqual(foldTop.segments, [{ x1: 100, y1: 0, x2: 100, y2: 30 }]);
+  const foldBottom = m.front.placed.find((x) => x.id === 'fold-bottom');
+  assert.deepEqual(foldBottom.segments, [{ x1: 100, y1: 300, x2: 100, y2: 270 }]);
+  // 背面不再缺折线标：长边翻转 (x, H-y)，上折线标翻到下方、与正面下折线标物理重合
+  assert.deepEqual(
+    m.back.placed.map((x) => x.id).sort(),
+    ['fold-bottom', 'fold-top']
+  );
+  assert.deepEqual(
+    m.back.omitted.filter((o) => o.type === 'fold').map((o) => o.id),
+    []
+  );
+  const backTop = m.back.placed.find((x) => x.pairedWith === 'fold-top');
+  assert.deepEqual(backTop.segments, [{ x1: 100, y1: 300, x2: 100, y2: 270 }]);
+  assert.equal(backTop.transform.flip, 'long');
+  // 1 张 × 2 面 × 2 = 4 个已放置折线标；其余 20 个为裁切线 / 套准十字出纸省略
+  assert.equal(r.productionMarks.placedCount, 4);
+  assert.equal(r.productionMarks.omittedCount, 20);
+});
+
+test('折线真正穿入出血框（出血跨过折线）时折线标仍按规则省略，背面同步省略', () => {
+  // 同样 200×300 纸张、100×250 成品页、标记 30mm，但出血 5mm：
+  // 两侧出血框各越过折线 5mm（左框 95..205、右框 -5..105），
+  // 折线标 x=100 位于两框内部且 y 0..30 与框区间 [20,275] 正长度重叠 -> 仍省略。
+  const r = computeImposition({
+    totalPages: 4, sheetsPerSignature: 1, binding: 'left', flip: 'long',
+    paperWidth: 200, paperHeight: 300, pageWidth: 100, pageHeight: 250,
+    bleedMm: 5, productionMarks: true, markSizeMm: 30,
+  });
+  const m = sheetMarks(r);
+  assert.equal(m.front.placed.some((x) => x.id === 'fold-top'), false);
+  const fold = m.front.omitted.find((o) => o.id === 'fold-top');
+  assert.equal(fold.reasonCode, 'segment-hits-bleed-box');
+  assert.match(fold.reason, /线段与出血框相交/);
+  const backFold = m.back.omitted.find((o) => o.id === 'fold-top');
+  assert.equal(backFold.reasonCode, 'paired-front-omitted');
+});
+
+test('裁切线 / 套准十字超出纸张仍省略：200×300 纸面 100×250 成品页出血 0、标记 30mm', () => {
+  // 该纸面出血框（=trim）顶 / 底外侧各有 25mm、左 / 右外侧为 0mm：
+  // 裁切线与套准十字的水平段直接伸出纸外，按 segment-outside-paper 省略（共边修复不影响该规则）。
+  const r = computeImposition({
+    totalPages: 4, sheetsPerSignature: 1, binding: 'left', flip: 'short',
+    paperWidth: 200, paperHeight: 300, pageWidth: 100, pageHeight: 250,
+    bleedMm: 0, productionMarks: true, markSizeMm: 30,
+  });
+  const m = sheetMarks(r);
+  // 8 裁切线 + 2 套准十字共 10 个省略，全部因水平段伸出纸外
+  assert.equal(m.front.omitted.length, 10);
+  assert.deepEqual(
+    m.front.omitted.map((o) => o.id).sort(),
+    [
+      'crop-bl-h', 'crop-bl-v', 'crop-br-h', 'crop-br-v',
+      'crop-tl-h', 'crop-tl-v', 'crop-tr-h', 'crop-tr-v',
+      'register-left', 'register-right',
+    ]
+  );
+  assert.ok(m.front.omitted.every((o) => o.reasonCode === 'segment-outside-paper'));
+  // 套准十字 3 个候选都尝试过
+  const reg = m.front.omitted.find((o) => o.id === 'register-left');
+  assert.equal(reg.attempts.length, 3);
+  assert.ok(reg.attempts.every((a) => a.checks.some((c) => c.code === 'segment-outside-paper')));
+  // 折线标不受影响，正常落位
+  assert.deepEqual(m.front.placed.map((x) => x.id), ['fold-top', 'fold-bottom']);
+});
+
 test('纸张过小无可用位置：标记省略并逐候选返回原因，背面同步省略', () => {
   // 426×303 纸张放 210×297 + 出血 3：两侧出血框几乎贴满纸张，
-  // 裁切线 / 套准十字没有纸面空间（折线标与出血框相交），全部省略
+  // 裁切线 / 套准十字没有纸面空间；折线 x=213 落在两侧出血框内部
+  // （左框 210、右框 216 起），折线标穿入出血框，全部省略
   const r = computeImposition({
     ...BASE, paperWidth: 426, paperHeight: 303,
     productionMarks: true,
@@ -188,7 +279,7 @@ test('纸张过小无可用位置：标记省略并逐候选返回原因，背�
   assert.deepEqual(reg.attempts.map((a) => a.position), [1, 2, 3]);
   assert.match(reg.reason, /候选位置 1/);
   assert.match(reg.reason, /候选位置 3/);
-  // 折线标与出血框相交（中线两侧出血框在中线上相接）
+  // 折线标穿入两侧出血框内部（出血框在中线两侧互相越过中线）
   const fold = m.front.omitted.find((o) => o.id === 'fold-top');
   assert.equal(fold.reasonCode, 'segment-hits-bleed-box');
   // 背面省略原因指向正面同名标记
@@ -304,9 +395,9 @@ test('线段相交原语：共线重叠算相交，端点相接 / 十字端点�
   assert.equal(segIntersect({ x1: 0, y1: 5, x2: 10, y2: 5 }, { x1: 0, y1: 6, x2: 10, y2: 6 }), false);
 });
 
-test('线段与出血框：共线于框边界仅端点相接不算，沿边界正长度重叠算相交', () => {
+test('线段与出血框：折线穿入出血框内部仍省略；裁切线 / 套准十字超出纸张仍省略', () => {
   const { placeFrontMarks } = require('../src/productionMarks');
-  // 直接构造一张带 fit 的最小纸张数据：左/右页位 trim 100×100、出血框 90..110
+  // 直接构造一张带 fit 的最小纸张数据：左/右页位 trim 100×100、出血框 90..110（出血跨过折线）
   const fitLeft = {
     trim: { x: 0, y: 0, width: 100, height: 100 },
     bleedBox: { x: -10, y: -10, width: 120, height: 120 },
@@ -316,7 +407,7 @@ test('线段与出血框：共线于框边界仅端点相接不算，沿边界�
     bleedBox: { x: 90, y: -10, width: 120, height: 120 },
   };
   const fakeSheet = { front: { left: { fit: fitLeft }, right: { fit: fitRight } } };
-  // 纸张 200×200，尺寸 3：折线标 x=100 落在两侧出血框并集区间内（左框到 110）-> 省略
+  // 纸张 200×200，尺寸 3：折线 x=100 落在两侧出血框内部（左框到 110、右框从 90）-> 省略
   const { placed, omitted } = placeFrontMarks(fakeSheet, 200, 200, 3);
   assert.ok(omitted.some((o) => o.id === 'fold-top' && o.reasonCode === 'segment-hits-bleed-box'));
   // 裁切线水平段 y=0（trim 顶边）位于出血框 y 区间 [-10,110] 内，x -12..-15 全程
@@ -333,19 +424,33 @@ test('线段与出血框：共线于框边界仅端点相接不算，沿边界�
   assert.equal(placed.some((p) => p.id === 'fold-top'), false);
 });
 
-test('segHitsBox：线段沿框边界正长度重叠算相交，仅端点 / 角点相接不算', () => {
+test('segHitsBox：线段穿入框内部且延伸维正长度重叠才算相交；边界共线 / 仅端点相接不算', () => {
   const { segHitsBox } = require('../src/productionMarks');
   const box = { x: 10, y: 20, width: 30, height: 40 }; // 10..40 × 20..60
-  // 水平线 y=20（框上边界），x 5..15：与边界 [10,20) 正长度重叠 -> 相交
-  assert.equal(segHitsBox({ x1: 5, y1: 20, x2: 15, y2: 20 }, box), true);
+  // 水平线 y=20（框上边界），x 5..15 沿边界正长度重叠 -> 共边允许，不算相交
+  assert.equal(segHitsBox({ x1: 5, y1: 20, x2: 15, y2: 20 }, box), false);
+  // 水平线 y=60（框下边界），全程沿边界 -> 共边允许，不算相交
+  assert.equal(segHitsBox({ x1: 10, y1: 60, x2: 40, y2: 60 }, box), false);
   // 水平线 y=19（框外 1mm）-> 不相交
   assert.equal(segHitsBox({ x1: 10, y1: 19, x2: 40, y2: 19 }, box), false);
   // 水平线终点恰在框角 (10,20) -> 仅角点相接，不算
   assert.equal(segHitsBox({ x1: 0, y1: 20, x2: 10, y2: 20 }, box), false);
-  // 竖直线 x=10（框左边界），y 25..30 沿边界 -> 相交
-  assert.equal(segHitsBox({ x1: 10, y1: 25, x2: 10, y2: 30 }, box), true);
+  // 水平线在框内、x 只在端点 10 处接触框 -> 仅端点相接，不算
+  assert.equal(segHitsBox({ x1: 0, y1: 40, x2: 10, y2: 40 }, box), false);
+  // 水平线穿入框内部且正长度重叠 -> 相交
+  assert.equal(segHitsBox({ x1: 5, y1: 40, x2: 15, y2: 40 }, box), true);
+  // 水平线横穿框内部 -> 相交
+  assert.equal(segHitsBox({ x1: 0, y1: 40, x2: 50, y2: 40 }, box), true);
+  // 竖直线 x=10（框左边界），y 25..30 沿边界正长度重叠 -> 共边允许，不算相交
+  assert.equal(segHitsBox({ x1: 10, y1: 25, x2: 10, y2: 30 }, box), false);
+  // 竖直线 x=40（框右边界），全程沿边界 -> 共边允许，不算相交
+  assert.equal(segHitsBox({ x1: 40, y1: 20, x2: 40, y2: 60 }, box), false);
   // 竖直线穿过框内部 -> 相交
   assert.equal(segHitsBox({ x1: 25, y1: 0, x2: 25, y2: 100 }, box), true);
+  // 竖直线在框内、y 只在端点 20 处接触框 -> 仅端点相接，不算
+  assert.equal(segHitsBox({ x1: 25, y1: 0, x2: 25, y2: 20 }, box), false);
+  // 竖直线起点恰在框角 (10,20) -> 仅角点相接，不算
+  assert.equal(segHitsBox({ x1: 10, y1: 0, x2: 10, y2: 20 }, box), false);
 });
 
 test('试印核验重算不受生产标记影响：同时启用时 verification 正常返回', () => {
